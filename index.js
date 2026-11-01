@@ -29,6 +29,37 @@ const clean = (b) => {
   return { e };
 };
 
+// the raw docs sit in `variable` with categories the form doesn't know, so fold them onto TYPES
+const toType = (d) => {
+  const t = (d.title || "").toLowerCase();
+  if (t.includes("blood")) return "Blood Donation";
+  if (t.includes("tree") || t.includes("plant")) return "Plantation";
+  if (t.includes("clean") || t.includes("riverbank")) return "Cleanup";
+  if (t.includes("food") || t.includes("kitchen")) return "Food Drive";
+  switch (d.category) {
+    case "Education": case "Awareness": return "Education";
+    case "Food": return "Food Drive";
+    case "Environment": return "Cleanup";
+    default: return "Donation";
+  }
+};
+
+const seed = async () => {
+  const raw = await db.collection("variable").find({}).toArray();
+  if (!raw.length || await events.countDocuments()) return;
+  const owner = (await db.collection("user").findOne({}))?.email || "seed@kindnest.local";
+  const docs = raw.map((d) => ({
+    title: String(d.title || "").trim(), description: String(d.description || "").trim(),
+    type: toType(d), thumbnail: d.image || "", location: String(d.location || "").trim(), date: d.date,
+    organizer: d.organizer || "", time: d.time || "", maxParticipants: d.maxParticipants || null,
+    creatorEmail: owner, seeded: true, createdAt: new Date(),
+  }));
+  const skipped = docs.filter((d) => !(d.date > today()));
+  if (skipped.length) console.log("past dates, won't list:", skipped.map((d) => d.title).join(", "));
+  await events.insertMany(docs);
+  console.log("Seeded " + docs.length + " events for " + owner);
+};
+
 app.get("/", (_, r) => r.send("KindNest API is running"));
 
 app.get("/events", async (req, res) => {
@@ -76,6 +107,7 @@ app.get("/joined", verify, async (req, res) => {
 });
 
 client.connect()
+  .then(() => seed().catch((e) => console.error("Seed failed:", e.message)))
   .then(() => app.listen(process.env.PORT || 5000, () => console.log("API ready")))
   .catch((e) => { console.error("MongoDB connection failed:", e.message); process.exit(1); });
 module.exports = app;
