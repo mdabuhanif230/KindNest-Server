@@ -1,4 +1,4 @@
-﻿require("dotenv").config();
+require("dotenv").config({ path: ".env.local" });
 const express = require("express"), cors = require("cors"), jwt = require("jsonwebtoken");
 const { MongoClient, ObjectId } = require("mongodb");
 const app = express();
@@ -61,6 +61,21 @@ app.delete("/events/:id", verify, async (req, res) => {
   if (!r.deletedCount) return bad(res, "You can only delete events you created.", 403);
   await joins.deleteMany({ eventId: req.params.id }); res.json({ ok: true });
 });
+app.post("/events/:id/join", verify, async (req, res) => {
+  const id = oid(req.params.id); if (!id) return bad(res, "Event not found.", 404);
+  const ev = await events.findOne({ _id: id });
+  if (!ev) return bad(res, "Event not found.", 404);
+  if (ev.date < today()) return bad(res, "This event has already happened.");
+  if (await joins.findOne({ eventId: req.params.id, userEmail: req.email })) return bad(res, "You already joined this event.", 409);
+  await joins.insertOne({ eventId: req.params.id, userEmail: req.email, event: ev, joinedAt: new Date() });
+  res.status(201).json({ ok: true });
+});
+app.get("/joined", verify, async (req, res) => {
+  const list = await joins.find({ userEmail: req.email }).toArray();
+  res.json(list.map((j) => j.event).sort((a, b) => a.date.localeCompare(b.date)));
+});
 
-client.connect().then(() => app.listen(process.env.PORT || 5000, () => console.log("API ready")));
+client.connect()
+  .then(() => app.listen(process.env.PORT || 5000, () => console.log("API ready")))
+  .catch((e) => { console.error("MongoDB connection failed:", e.message); process.exit(1); });
 module.exports = app;
