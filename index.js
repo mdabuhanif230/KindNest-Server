@@ -42,6 +42,25 @@ app.get("/events/:id", async (req, res) => {
   const ev = await events.findOne({ _id: id });
   ev ? res.json(ev) : bad(res, "Event not found.", 404);
 });
+app.post("/events", verify, async (req, res) => {
+  const { e, error } = clean(req.body); if (error) return bad(res, error);
+  const r = await events.insertOne({ ...e, creatorEmail: req.email, createdAt: new Date() });
+  res.status(201).json({ _id: r.insertedId });
+});
+app.get("/my-events", verify, async (req, res) =>
+  res.json(await events.find({ creatorEmail: req.email }).sort({ date: 1 }).toArray()));
+app.put("/events/:id", verify, async (req, res) => {
+  const id = oid(req.params.id); if (!id) return bad(res, "Event not found.", 404);
+  const { e, error } = clean(req.body); if (error) return bad(res, error);
+  const r = await events.updateOne({ _id: id, creatorEmail: req.email }, { $set: e });
+  r.matchedCount ? res.json({ ok: true }) : bad(res, "You can only edit events you created.", 403);
+});
+app.delete("/events/:id", verify, async (req, res) => {
+  const id = oid(req.params.id); if (!id) return bad(res, "Event not found.", 404);
+  const r = await events.deleteOne({ _id: id, creatorEmail: req.email });
+  if (!r.deletedCount) return bad(res, "You can only delete events you created.", 403);
+  await joins.deleteMany({ eventId: req.params.id }); res.json({ ok: true });
+});
 
 client.connect().then(() => app.listen(process.env.PORT || 5000, () => console.log("API ready")));
 module.exports = app;
