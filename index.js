@@ -1,4 +1,9 @@
 require("dotenv").config({ path: ".env.local" });
+require("dotenv").config(); // fallback: loads .env if .env.local doesn't define the vars
+if (!process.env.MONGODB_URI) {
+  console.error("MONGODB_URI is not set. Add it to .env or .env.local.");
+  process.exit(1);
+}
 const express = require("express"), cors = require("cors"), jwt = require("jsonwebtoken");
 const { MongoClient, ObjectId } = require("mongodb");
 const app = express();
@@ -18,14 +23,18 @@ const verify = (req, res, next) => {
   catch { bad(res, "Your session has expired. Log in again.", 403); }
 };
 
-const clean = (b) => {
+const TYPES = ["Cleanup", "Plantation", "Donation", "Food Drive", "Blood Donation", "Education"];
+// keepDate: the event's existing date on update — lets a past event keep its own date
+const clean = (b, keepDate) => {
   const e = {};
   for (const k of ["title", "description", "type", "thumbnail", "location", "date"]) e[k] = String(b[k] || "").trim();
   if (Object.values(e).some((v) => !v)) return { error: "Fill in every field." };
+  if (!TYPES.includes(e.type)) return { error: "Pick a valid event type." };
   if (e.title.length < 5) return { error: "Title needs at least 5 characters." };
   if (e.description.length < 20) return { error: "Description needs at least 20 characters." };
   if (!/^https?:\/\//.test(e.thumbnail)) return { error: "Thumbnail must be a valid image URL." };
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(e.date) || e.date <= today()) return { error: "Pick a date in the future." };
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(e.date)) return { error: "Pick a valid date." };
+  if (e.date <= today() && e.date !== keepDate) return { error: "Pick a date in the future." };
   return { e };
 };
 
@@ -82,9 +91,12 @@ app.get("/my-events", verify, async (req, res) =>
   res.json(await events.find({ creatorEmail: req.email }).sort({ date: 1 }).toArray()));
 app.put("/events/:id", verify, async (req, res) => {
   const id = oid(req.params.id); if (!id) return bad(res, "Event not found.", 404);
-  const { e, error } = clean(req.body); if (error) return bad(res, error);
-  const r = await events.updateOne({ _id: id, creatorEmail: req.email }, { $set: e });
-  r.matchedCount ? res.json({ ok: true }) : bad(res, "You can only edit events you created.", 403);
+  const orig = await events.findOne({ _id: id });
+  if (!orig) return bad(res, "Event not found.", 404);
+  if (orig.creatorEmail !== req.email) return bad(res, "You can only edit events you created.", 403);
+  const { e, error } = clean(req.body, orig.date); if (error) return bad(res, error);
+  await events.updateOne({ _id: id }, { $set: e });
+  res.json({ ok: true });
 });
 app.delete("/events/:id", verify, async (req, res) => {
   const id = oid(req.params.id); if (!id) return bad(res, "Event not found.", 404);
@@ -103,7 +115,11 @@ app.post("/events/:id/join", verify, async (req, res) => {
 });
 app.get("/joined", verify, async (req, res) => {
   const list = await joins.find({ userEmail: req.email }).toArray();
-  res.json(list.map((j) => j.event).sort((a, b) => a.date.localeCompare(b.date)));
+  // re-fetch current event docs so edits/deletions show up (join docs hold a stale snapshot)
+  const ids = list.map((j) => j.eventId).filter((v) => ObjectId.isValid(v)).map((v) => new ObjectId(v));
+  const current = await events.find({ _id: { $in: ids } }).toArray();
+  const byId = new Map(current.map((e) => [String(e._id), e]));
+  res.json(list.map((j) => byId.get(j.eventId)).filter(Boolean).sort((a, b) => a.date.localeCompare(b.date)));
 });
 
 client.connect()
