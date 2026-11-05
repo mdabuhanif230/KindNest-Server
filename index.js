@@ -462,7 +462,7 @@ app.get("/joined", verifyToken, wrap(async (req, res) => {
     .find({ userEmail: req.email })
     .toArray();
 
-  const ids = lis
+  const ids = list
     .map((item) => item.eventId)
     .filter((id) => ObjectId.isValid(id))
     .map((id) => new ObjectId(id));
@@ -475,7 +475,7 @@ app.get("/joined", verifyToken, wrap(async (req, res) => {
     currentEvents.map((event) => [String(event._id), event])
   );
 
-  const result = lis
+  const result = list
     .map((item) => eventMap.get(item.eventId))
     .filter(Boolean)
     .sort((a, b) => a.date.localeCompare(b.date));
