@@ -57,7 +57,7 @@ Requirements: Node.js and access to a MongoDB database.
 | Method | Route | Access | Description |
 | --- | --- | --- | --- |
 | `GET` | `/` | Public | Check that the API is running |
-| `GET` | `/events` | Public | List upcoming events |
+| `GET` | `/events` | Public | List upcoming events; optional `type`, `search`, `limit` (max 100), and `skip` (max 10000) query parameters |
 | `GET` | `/events/:id` | Public | Get an event |
 | `POST` | `/events` | JWT required | Create an event |
 | `GET` | `/my-events` | JWT required | List events created by the current user |

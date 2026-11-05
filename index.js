@@ -287,6 +287,16 @@ app.get("/events", wrap(async (req, res) => {
   const query = {
     date: { $gte: today() }
   };
+  const requestedLimit = req.query.limit === undefined ? 0 : Number(req.query.limit);
+  const requestedSkip = req.query.skip === undefined ? 0 : Number(req.query.skip);
+
+  if (!Number.isInteger(requestedLimit) || requestedLimit < 0) {
+    return bad(res, "Limit must be a non-negative whole number.");
+  }
+
+  if (!Number.isInteger(requestedSkip) || requestedSkip < 0 || requestedSkip > 10000) {
+    return bad(res, "Skip must be a whole number between 0 and 10000.");
+  }
 
   if (req.query.type) {
     query.type = req.query.type;
@@ -306,8 +316,9 @@ app.get("/events", wrap(async (req, res) => {
 
   const result = await events
     .find(query)
-    .sort({ date: 1 })
-    .limit(Number(req.query.limit) || 0)
+    .sort({ date: 1, _id: 1 })
+    .skip(requestedSkip)
+    .limit(requestedLimit ? Math.min(requestedLimit, 100) : 0)
     .toArray();
 
   res.json(result);
