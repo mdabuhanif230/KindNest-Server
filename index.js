@@ -1,129 +1,579 @@
-require("dotenv").config({ path: ".env.local" });
-require("dotenv").config(); // fallback: loads .env if .env.local doesn't define the vars
+
+import dotenv from "dotenv";
+import express from "express";
+import cors from "cors";
+import jwt from "jsonwebtoken";
+import { MongoClient, ObjectId } from "mongodb";
+
+
+dotenv.config({ path: ".env.local" });
+dotenv.config();
+
 if (!process.env.MONGODB_URI) {
-  console.error("MONGODB_URI is not set. Add it to .env or .env.local.");
+  console.log("MONGODB_URI is missing.");
   process.exit(1);
 }
-const express = require("express"), cors = require("cors"), jwt = require("jsonwebtoken");
-const { MongoClient, ObjectId } = require("mongodb");
+
 const app = express();
-app.use(cors({ origin: process.env.CLIENT_URL?.split(",") })); app.use(express.json());
+const PORT = process.env.PORT || 5000;
+
+
+app.use(cors({
+  origin: process.env.CLIENT_URL?.split(",")
+}));
+
+app.use(express.json({ limit: "1mb" }));
+
 
 const client = new MongoClient(process.env.MONGODB_URI);
-const db = client.db("kindnest"), events = db.collection("events"), joins = db.collection("joins");
+
+export async function connectToMongoDB() {
+  try {
+    await client.connect();
+    console.log("MongoDB connected successfully");
+    return client;
+  } catch (error) {
+    console.log(error);
+  }
+}
+
+const mongoClient = await connectToMongoDB();
+
+if (!mongoClient) {
+  console.log("MongoDB connection failed.");
+  process.exit(1);
+}
+
+const db = mongoClient.db("kindnest");
+
+const events = db.collection("events");
+const joins = db.collection("joins");
+const avatars = db.collection("avatars");
+
+
+await joins
+  .createIndex({ eventId: 1, userEmail: 1 }, { unique: true })
+  .catch((error) => console.log("joins unique index:", error.message));
+
+
 const today = () => new Date().toISOString().slice(0, 10);
-const bad = (res, m, c = 400) => res.status(c).json({ message: m });
-const oid = (id) => (ObjectId.isValid(id) ? new ObjectId(id) : null);
 
-// JWT guard: token is signed by the Next.js app after BetterAuth confirms the session
-const verify = (req, res, next) => {
-  const t = req.headers.authorization?.split(" ")[1];
-  if (!t) return bad(res, "Please log in to continue.", 401);
-  try { req.email = jwt.verify(t, process.env.JWT_SECRET).email; next(); }
-  catch { bad(res, "Your session has expired. Log in again.", 403); }
+const bad = (res, message, status = 400) => {
+  return res.status(status).json({ message });
 };
 
-const TYPES = ["Cleanup", "Plantation", "Donation", "Food Drive", "Blood Donation", "Education"];
-// keepDate: the event's existing date on update — lets a past event keep its own date
-const clean = (b, keepDate) => {
-  const e = {};
-  for (const k of ["title", "description", "type", "thumbnail", "location", "date"]) e[k] = String(b[k] || "").trim();
-  if (Object.values(e).some((v) => !v)) return { error: "Fill in every field." };
-  if (!TYPES.includes(e.type)) return { error: "Pick a valid event type." };
-  if (e.title.length < 5) return { error: "Title needs at least 5 characters." };
-  if (e.description.length < 20) return { error: "Description needs at least 20 characters." };
-  if (!/^https?:\/\//.test(e.thumbnail)) return { error: "Thumbnail must be a valid image URL." };
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(e.date)) return { error: "Pick a valid date." };
-  if (e.date <= today() && e.date !== keepDate) return { error: "Pick a date in the future." };
-  return { e };
+const oid = (id) => {
+  return ObjectId.isValid(id) ? new ObjectId(id) : null;
 };
 
-// the raw docs sit in `variable` with categories the form doesn't know, so fold them onto TYPES
-const toType = (d) => {
-  const t = (d.title || "").toLowerCase();
-  if (t.includes("blood")) return "Blood Donation";
-  if (t.includes("tree") || t.includes("plant")) return "Plantation";
-  if (t.includes("clean") || t.includes("riverbank")) return "Cleanup";
-  if (t.includes("food") || t.includes("kitchen")) return "Food Drive";
-  switch (d.category) {
-    case "Education": case "Awareness": return "Education";
-    case "Food": return "Food Drive";
-    case "Environment": return "Cleanup";
-    default: return "Donation";
+
+const wrap = (handler) => (req, res, next) => {
+  return Promise.resolve(handler(req, res, next)).catch(next);
+};
+
+
+const verifyToken = (req, res, next) => {
+  const token = req.headers.authorization?.split(" ")[1];
+
+  if (!token) {
+    return bad(res, "Please log in to continue.", 401);
+  }
+
+  try {
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    req.email = decoded.email;
+    next();
+  } catch (error) {
+    return bad(res, "Your session has expired. Log in again.", 403);
   }
 };
 
-const seed = async () => {
-  const raw = await db.collection("variable").find({}).toArray();
-  if (!raw.length || await events.countDocuments()) return;
-  const owner = (await db.collection("user").findOne({}))?.email || "seed@kindnest.local";
-  const docs = raw.map((d) => ({
-    title: String(d.title || "").trim(), description: String(d.description || "").trim(),
-    type: toType(d), thumbnail: d.image || "", location: String(d.location || "").trim(), date: d.date,
-    organizer: d.organizer || "", time: d.time || "", maxParticipants: d.maxParticipants || null,
-    creatorEmail: owner, seeded: true, createdAt: new Date(),
-  }));
-  const skipped = docs.filter((d) => !(d.date > today()));
-  if (skipped.length) console.log("past dates, won't list:", skipped.map((d) => d.title).join(", "));
-  await events.insertMany(docs);
-  console.log("Seeded " + docs.length + " events for " + owner);
+
+const TYPES = [
+  "Cleanup",
+  "Plantation",
+  "Donation",
+  "Food Drive",
+  "Blood Donation",
+  "Education"
+];
+
+
+const clean = (body, keepDate) => {
+  const event = {};
+
+  const fields = [
+    "title",
+    "description",
+    "type",
+    "thumbnail",
+    "location",
+    "date"
+  ];
+
+  for (const field of fields) {
+    event[field] = String(body[field] || "").trim();
+  }
+
+  if (Object.values(event).some((value) => !value)) {
+    return { error: "Fill in every field." };
+  }
+
+  if (!TYPES.includes(event.type)) {
+    return { error: "Pick a valid event type." };
+  }
+
+  if (event.title.length < 5) {
+    return { error: "Title needs at least 5 characters." };
+  }
+
+  if (event.description.length < 20) {
+    return { error: "Description needs at least 20 characters." };
+  }
+
+  if (!/^https?:\/\//.test(event.thumbnail)) {
+    return { error: "Thumbnail must be a valid image URL." };
+  }
+
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(event.date)) {
+    return { error: "Pick a valid date." };
+  }
+
+  if (event.date <= today() && event.date !== keepDate) {
+    return { error: "Pick a date in the future." };
+  }
+
+  return { e: event };
 };
 
-app.get("/", (_, r) => r.send("KindNest API is running"));
 
-app.get("/events", async (req, res) => {
-  const q = { date: { $gte: today() } };
-  if (req.query.type) q.type = req.query.type;
-  if (req.query.search) q.title = { $regex: req.query.search.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), $options: "i" };
-  res.json(await events.find(q).sort({ date: 1 }).limit(Number(req.query.limit) || 0).toArray());
+const toType = (data) => {
+
+  if (data.category && TYPES.includes(data.category)) {
+    return data.category;
+  }
+
+  const title = (data.title || "").toLowerCase();
+
+  if (title.includes("blood")) {
+    return "Blood Donation";
+  }
+
+  if (/\btree|\bplant/.test(title)) {
+    return "Plantation";
+  }
+
+  if (title.includes("clean") || title.includes("riverbank")) {
+    return "Cleanup";
+  }
+
+  if (title.includes("food") || title.includes("kitchen")) {
+    return "Food Drive";
+  }
+
+  switch (data.category) {
+    case "Education":
+    case "Awareness":
+      return "Education";
+
+    case "Food":
+      return "Food Drive";
+
+    case "Environment":
+      return "Cleanup";
+
+    default:
+      return "Donation";
+  }
+};
+
+
+const DEMO_OWNER = "demo@kindnest.local";
+
+const seed = async () => {
+
+  await events.updateMany(
+    { seeded: true, creatorEmail: { $ne: DEMO_OWNER } },
+    { $set: { creatorEmail: DEMO_OWNER } }
+  );
+
+
+  const misshapen = await events
+    .find({
+      $or: [
+        { thumbnail: { $exists: false } },
+        { type: { $exists: false } },
+        { category: { $exists: true } }
+      ]
+    })
+    .toArray();
+
+  for (const doc of misshapen) {
+    await events.updateOne(
+      { _id: doc._id },
+      {
+        $set: {
+          ...(doc.thumbnail ? {} : { thumbnail: String(doc.image || "") }),
+          type: toType(doc)
+        }
+      }
+    );
+  }
+
+  const raw = await db.collection("variable").find({}).toArray();
+
+  if (!raw.length) {
+    return;
+  }
+
+  const docs = raw.map((data) => ({
+    title: String(data.title || "").trim(),
+    description: String(data.description || "").trim(),
+    type: toType(data),
+    thumbnail: data.image || "",
+    location: String(data.location || "").trim(),
+    date: data.date,
+    organizer: data.organizer || "",
+    time: data.time || "",
+    maxParticipants: data.maxParticipants || null,
+    creatorEmail: DEMO_OWNER,
+    seeded: true,
+    createdAt: new Date()
+  }));
+
+  const existing = await events
+    .find({}, { projection: { title: 1 } })
+    .toArray();
+
+  const have = new Set(existing.map((event) => event.title));
+  const fresh = docs.filter((doc) => !have.has(doc.title));
+
+  if (!fresh.length) {
+    return;
+  }
+
+  const skipped = fresh.filter((data) => !(data.date > today()));
+
+  if (skipped.length) {
+    console.log(
+      "Past dates, won't list:",
+      skipped.map((data) => data.title).join(", ")
+    );
+  }
+
+  await events.insertMany(fresh);
+
+  console.log("Seeded " + fresh.length + " new demo events");
+};
+
+
+app.get("/", (req, res) => {
+  res.send("KindNest API is running");
 });
-app.get("/events/:id", async (req, res) => {
-  const id = oid(req.params.id); if (!id) return bad(res, "Event not found.", 404);
-  const ev = await events.findOne({ _id: id });
-  ev ? res.json(ev) : bad(res, "Event not found.", 404);
-});
-app.post("/events", verify, async (req, res) => {
-  const { e, error } = clean(req.body); if (error) return bad(res, error);
-  const r = await events.insertOne({ ...e, creatorEmail: req.email, createdAt: new Date() });
-  res.status(201).json({ _id: r.insertedId });
-});
-app.get("/my-events", verify, async (req, res) =>
-  res.json(await events.find({ creatorEmail: req.email }).sort({ date: 1 }).toArray()));
-app.put("/events/:id", verify, async (req, res) => {
-  const id = oid(req.params.id); if (!id) return bad(res, "Event not found.", 404);
-  const orig = await events.findOne({ _id: id });
-  if (!orig) return bad(res, "Event not found.", 404);
-  if (orig.creatorEmail !== req.email) return bad(res, "You can only edit events you created.", 403);
-  const { e, error } = clean(req.body, orig.date); if (error) return bad(res, error);
-  await events.updateOne({ _id: id }, { $set: e });
+
+
+app.get("/events", wrap(async (req, res) => {
+  const query = {
+    date: { $gte: today() }
+  };
+
+  if (req.query.type) {
+    query.type = req.query.type;
+  }
+
+  if (req.query.search) {
+    const search = req.query.search.replace(
+      /[.*+?^${}()|[\]\\]/g,
+      "\\$&"
+    );
+
+    query.title = {
+      $regex: search,
+      $options: "i"
+    };
+  }
+
+  const result = await events
+    .find(query)
+    .sort({ date: 1 })
+    .limit(Number(req.query.limit) || 0)
+    .toArray();
+
+  res.json(result);
+}));
+
+
+app.get("/events/:id", wrap(async (req, res) => {
+  const id = oid(req.params.id);
+
+  if (!id) {
+    return bad(res, "Event not found.", 404);
+  }
+
+  const event = await events.findOne({ _id: id });
+
+  if (!event) {
+    return bad(res, "Event not found.", 404);
+  }
+
+  res.json(event);
+}));
+
+
+app.post("/events", verifyToken, wrap(async (req, res) => {
+  const { e, error } = clean(req.body);
+
+  if (error) {
+    return bad(res, error);
+  }
+
+  const result = await events.insertOne({
+    ...e,
+    creatorEmail: req.email,
+    createdAt: new Date()
+  });
+
+  res.status(201).json({
+    _id: result.insertedId
+  });
+}));
+
+
+app.get("/my-events", verifyToken, wrap(async (req, res) => {
+  const result = await events
+    .find({ creatorEmail: req.email })
+    .sort({ date: 1 })
+    .toArray();
+
+  res.json(result);
+}));
+
+
+app.put("/events/:id", verifyToken, wrap(async (req, res) => {
+  const id = oid(req.params.id);
+
+  if (!id) {
+    return bad(res, "Event not found.", 404);
+  }
+
+  const original = await events.findOne({ _id: id });
+
+  if (!original) {
+    return bad(res, "Event not found.", 404);
+  }
+
+  if (original.creatorEmail !== req.email) {
+    return bad(res, "You can only edit events you created.", 403);
+  }
+
+  const { e, error } = clean(req.body, original.date);
+
+  if (error) {
+    return bad(res, error);
+  }
+
+  await events.updateOne(
+    { _id: id },
+    { $set: e }
+  );
+
   res.json({ ok: true });
-});
-app.delete("/events/:id", verify, async (req, res) => {
-  const id = oid(req.params.id); if (!id) return bad(res, "Event not found.", 404);
-  const r = await events.deleteOne({ _id: id, creatorEmail: req.email });
-  if (!r.deletedCount) return bad(res, "You can only delete events you created.", 403);
-  await joins.deleteMany({ eventId: req.params.id }); res.json({ ok: true });
-});
-app.post("/events/:id/join", verify, async (req, res) => {
-  const id = oid(req.params.id); if (!id) return bad(res, "Event not found.", 404);
-  const ev = await events.findOne({ _id: id });
-  if (!ev) return bad(res, "Event not found.", 404);
-  if (ev.date < today()) return bad(res, "This event has already happened.");
-  if (await joins.findOne({ eventId: req.params.id, userEmail: req.email })) return bad(res, "You already joined this event.", 409);
-  await joins.insertOne({ eventId: req.params.id, userEmail: req.email, event: ev, joinedAt: new Date() });
+}));
+
+
+app.delete("/events/:id", verifyToken, wrap(async (req, res) => {
+  const id = oid(req.params.id);
+
+  if (!id) {
+    return bad(res, "Event not found.", 404);
+  }
+
+  const result = await events.deleteOne({
+    _id: id,
+    creatorEmail: req.email
+  });
+
+  if (!result.deletedCount) {
+    return bad(res, "You can only delete events you created.", 403);
+  }
+
+  await joins.deleteMany({
+    eventId: req.params.id
+  });
+
+  res.json({ ok: true });
+}));
+
+
+app.post("/events/:id/join", verifyToken, wrap(async (req, res) => {
+  const id = oid(req.params.id);
+
+  if (!id) {
+    return bad(res, "Event not found.", 404);
+  }
+
+  const event = await events.findOne({ _id: id });
+
+  if (!event) {
+    return bad(res, "Event not found.", 404);
+  }
+
+  if (event.date < today()) {
+    return bad(res, "This event has already happened.");
+  }
+
+  const alreadyJoined = await joins.findOne({
+    eventId: req.params.id,
+    userEmail: req.email
+  });
+
+  if (alreadyJoined) {
+    return bad(res, "You already joined this event.", 409);
+  }
+
+
+  const account = await db.collection("user").findOne(
+    { email: req.email },
+    { projection: { name: 1 } }
+  );
+
+  try {
+    await joins.insertOne({
+      eventId: req.params.id,
+      userEmail: req.email,
+      userName: account?.name || "",
+      event,
+      joinedAt: new Date()
+    });
+  } catch (error) {
+
+    if (error?.code === 11000) {
+      return bad(res, "You already joined this event.", 409);
+    }
+    throw error;
+  }
+
   res.status(201).json({ ok: true });
-});
-app.get("/joined", verify, async (req, res) => {
-  const list = await joins.find({ userEmail: req.email }).toArray();
-  // re-fetch current event docs so edits/deletions show up (join docs hold a stale snapshot)
-  const ids = list.map((j) => j.eventId).filter((v) => ObjectId.isValid(v)).map((v) => new ObjectId(v));
-  const current = await events.find({ _id: { $in: ids } }).toArray();
-  const byId = new Map(current.map((e) => [String(e._id), e]));
-  res.json(list.map((j) => byId.get(j.eventId)).filter(Boolean).sort((a, b) => a.date.localeCompare(b.date)));
+}));
+
+
+app.get("/joined", verifyToken, wrap(async (req, res) => {
+  const list = await joins
+    .find({ userEmail: req.email })
+    .toArray();
+
+  const ids = lis
+    .map((item) => item.eventId)
+    .filter((id) => ObjectId.isValid(id))
+    .map((id) => new ObjectId(id));
+
+  const currentEvents = await events
+    .find({ _id: { $in: ids } })
+    .toArray();
+
+  const eventMap = new Map(
+    currentEvents.map((event) => [String(event._id), event])
+  );
+
+  const result = lis
+    .map((item) => eventMap.get(item.eventId))
+    .filter(Boolean)
+    .sort((a, b) => a.date.localeCompare(b.date));
+
+  res.json(result);
+}));
+
+
+const DATA_URL = /^data:image\/(jpeg|png|webp|gif);base64,([A-Za-z0-9+/]+={0,2})$/;
+
+
+const isRealImage = (data) => {
+  return (
+    (data[0] === 0xff && data[1] === 0xd8 && data[2] === 0xff) ||
+
+    data.subarray(0, 8).equals(
+      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
+    ) ||
+
+    data.subarray(0, 4).toString("ascii") === "GIF8" ||
+
+    (
+      data.subarray(0, 4).toString("ascii") === "RIFF" &&
+      data.subarray(8, 12).toString("ascii") === "WEBP"
+    )
+  );
+};
+
+
+app.post("/avatar", verifyToken, wrap(async (req, res) => {
+  const match = DATA_URL.exec(String(req.body?.image || ""));
+
+  if (!match) {
+    return bad(
+      res,
+      "Send the photo as a JPEG, PNG, WebP or GIF data URL."
+    );
+  }
+
+  const data = Buffer.from(match[2], "base64");
+
+  if (!data.length || !isRealImage(data)) {
+    return bad(res, "That file is not a real image.");
+  }
+
+  if (data.length > 400 * 1024) {
+    return bad(res, "Photo is too large — keep it under 400KB.");
+  }
+
+  const type = `image/${match[1]}`;
+
+  await avatars.updateOne(
+    { _id: req.email },
+    {
+      $set: {
+        image: match[2],
+        type,
+        updatedAt: new Date()
+      }
+    },
+    { upsert: true }
+  );
+
+  res.json({
+    path: `/avatar/${encodeURIComponent(req.email)}?v=${Date.now()}`
+  });
+}));
+
+
+app.get("/avatar/:email", wrap(async (req, res) => {
+  const avatar = await avatars.findOne({
+    _id: req.params.email
+  });
+
+  if (!avatar?.image) {
+    return bad(res, "No photo for that account.", 404);
+  }
+
+  res.setHeader("Content-Type", avatar.type);
+
+  res.set("Cache-Control", "public, max-age=86400");
+
+  res.send(Buffer.from(avatar.image, "base64"));
+}));
+
+
+app.use((error, req, res, next) => {
+  console.log("Server error:", error.message);
+  bad(res, "Something went wrong on the server. Try again.", 500);
 });
 
-client.connect()
-  .then(() => seed().catch((e) => console.error("Seed failed:", e.message)))
-  .then(() => app.listen(process.env.PORT || 5000, () => console.log("API ready")))
-  .catch((e) => { console.error("MongoDB connection failed:", e.message); process.exit(1); });
-module.exports = app;
+
+await seed().catch((error) => {
+  console.log("Seed failed:", error.message);
+});
+
+app.listen(PORT, () => {
+  console.log("API ready on port " + PORT);
+});
+
+export default app;
