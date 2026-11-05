@@ -10,7 +10,12 @@ dotenv.config({ path: ".env.local" });
 dotenv.config();
 
 if (!process.env.MONGODB_URI) {
-  console.log("MONGODB_URI is missing.");
+  console.error("MONGODB_URI is missing.");
+  process.exit(1);
+}
+
+if (!process.env.JWT_SECRET) {
+  console.error("JWT_SECRET is missing.");
   process.exit(1);
 }
 
@@ -84,18 +89,21 @@ const wrap = (handler) => (req, res, next) => {
 
 
 const verifyToken = (req, res, next) => {
-  const token = req.headers.authorization?.split(" ")[1];
+  const match = /^Bearer\s+(.+)$/i.exec(req.headers.authorization || "");
 
-  if (!token) {
+  if (!match) {
     return bad(res, "Please log in to continue.", 401);
   }
 
   try {
-    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    const decoded = jwt.verify(match[1], process.env.JWT_SECRET);
+    if (typeof decoded?.email !== "string" || !decoded.email.trim()) {
+      return bad(res, "Your session is invalid. Log in again.", 401);
+    }
     req.email = decoded.email;
     next();
-  } catch (error) {
-    return bad(res, "Your session has expired. Log in again.", 403);
+  } catch {
+    return bad(res, "Your session is invalid or expired. Log in again.", 401);
   }
 };
 
