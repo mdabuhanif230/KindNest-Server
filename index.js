@@ -418,13 +418,23 @@ app.delete("/events/:id", verifyToken, wrap(async (req, res) => {
     return bad(res, "Event not found.", 404);
   }
 
+  const event = await events.findOne({ _id: id });
+
+  if (!event) {
+    return bad(res, "Event not found.", 404);
+  }
+
+  if (event.creatorEmail !== req.email) {
+    return bad(res, "You can only delete events you created.", 403);
+  }
+
   const result = await events.deleteOne({
     _id: id,
     creatorEmail: req.email
   });
 
   if (!result.deletedCount) {
-    return bad(res, "You can only delete events you created.", 403);
+    return bad(res, "Event not found.", 404);
   }
 
   await joins.deleteMany({
