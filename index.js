@@ -58,6 +58,17 @@ await joins
 
 const today = () => new Date().toISOString().slice(0, 10);
 
+const isCalendarDate = (value) => {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const [year, month, day] = value.split("-").map(Number);
+  const parsed = new Date(`${value}T00:00:00.000Z`);
+  return (
+    parsed.getUTCFullYear() === year &&
+    parsed.getUTCMonth() + 1 === month &&
+    parsed.getUTCDate() === day
+  );
+};
+
 const bad = (res, message, status = 400) => {
   return res.status(status).json({ message });
 };
@@ -135,7 +146,7 @@ const clean = (body, keepDate) => {
     return { error: "Thumbnail must be a valid image URL." };
   }
 
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(event.date)) {
+  if (!isCalendarDate(event.date)) {
     return { error: "Pick a valid date." };
   }
 
